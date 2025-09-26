@@ -281,8 +281,12 @@ function create_select_tracklist_type_menu_opener(opts)
 					h(t('external'))
 				end
 
+				local title = nil
+				if track_titles[opts.type] and track_titles[opts.type][track.id] then
+					title = track_titles[opts.type][track.id]
+				end
 				items[#items + 1] = {
-					title = (track.title and track.title or t('Track %s', track.id)),
+					title = (title or track.title or t('Track %s', track.id)),
 					hint = table.concat(hint_values, ', '),
 					value = track.id,
 					active = track_selected or snd_selected,

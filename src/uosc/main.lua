@@ -429,6 +429,7 @@ state = {
 }
 buttons = require('lib/buttons')
 thumbnail = {width = 0, height = 0, disabled = false}
+track_titles = {}
 external = {} -- Properties set by external scripts
 key_binding_overwrites = {} -- Table of key_binding:mpv_command
 Elements = require('elements/Elements')
@@ -1108,6 +1109,11 @@ mp.register_script_message('select-menu-item', function(type, item_index, menu_i
 			menu:scroll_to_index(index, menu_id, true)
 		end
 	end
+end)
+mp.register_script_message("set-track-title", function (json)
+	mp.commandv('show-text', "Received track title via IPC: " .. (json or "nil"), 3000)
+	local data = utils.parse_json(json)
+	track_titles = data
 end)
 mp.register_script_message('close-menu', function(type)
 	if Menu:is_open(type) then Menu:close() end
