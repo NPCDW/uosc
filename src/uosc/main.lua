@@ -1111,7 +1111,7 @@ mp.register_script_message('select-menu-item', function(type, item_index, menu_i
 	end
 end)
 mp.register_script_message("set-track-title", function (json)
-	mp.commandv('show-text', "Received track title via IPC: " .. (json or "nil"), 3000)
+	-- mp.commandv('show-text', "Received track title via IPC: " .. (json or "nil"), 3000)
 	local data = utils.parse_json(json)
 	track_titles = data
 end)
