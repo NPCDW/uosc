@@ -39,6 +39,7 @@ function Controls:init_options()
 		['play-pause'] = 'cycle:pause:pause:no/yes=play_arrow?' .. t('Play/Pause'),
 		menu = 'command:menu:script-binding uosc/menu-blurred?' .. t('Menu'),
 		analytics = 'command:analytics:script-binding stats/display-stats-toggle?' .. t('Analytics'),
+		ontop = 'cycle:publish:ontop:no/yes!?' .. t('Ontop'),
 		subtitles = 'command:subtitles:script-binding uosc/subtitles#sub>0?' .. t('Subtitles'),
 		audio = 'command:graphic_eq:script-binding uosc/audio#audio>1?' .. t('Audio'),
 		['audio-device'] = 'command:speaker:script-binding uosc/audio-device?' .. t('Audio device'),
