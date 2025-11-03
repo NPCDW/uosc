@@ -429,7 +429,8 @@ state = {
 }
 buttons = require('lib/buttons')
 thumbnail = {width = 0, height = 0, disabled = false}
-track_titles = {}
+track_titles = {}  -- {video: string[]; audio: string[]; sub: string[]}
+muti_versions = {}  -- {path: string; title: string; hint: string}[]
 external = {} -- Properties set by external scripts
 key_binding_overwrites = {} -- Table of key_binding:mpv_command
 Elements = require('elements/Elements')
@@ -954,6 +955,7 @@ bind_command('show-in-directory', function()
 	end
 end)
 bind_command('stream-quality', open_stream_quality_menu)
+bind_command('muti-version', open_muti_version_menu)
 bind_command('open-file', open_open_file_menu)
 bind_command('shuffle', function() set_state('shuffle', not state.shuffle) end)
 bind_command('items', function()
@@ -1114,6 +1116,11 @@ mp.register_script_message("set-track-title", function (json)
 	-- mp.commandv('show-text', "Received track title via IPC: " .. (json or "nil"), 3000)
 	local data = utils.parse_json(json)
 	track_titles = data
+end)
+mp.register_script_message("set-muti-version", function (json)
+	-- mp.commandv('show-text', "Received muti versions via IPC: " .. (json or "nil"), 3000)
+	local data = utils.parse_json(json)
+	muti_versions = data
 end)
 mp.register_script_message('close-menu', function(type)
 	if Menu:is_open(type) then Menu:close() end

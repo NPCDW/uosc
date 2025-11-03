@@ -783,6 +783,73 @@ function open_stream_quality_menu()
 	end)
 end
 
+function open_muti_version_menu()
+	if Menu:is_open('muti-version') then
+		Menu:close()
+		return
+	end
+
+	local current_path = mp.get_property_native('path')
+	local items = {}
+	---@type Menu
+	local menu
+
+	for index, item in ipairs(muti_versions) do
+		items[index] = {
+			title = item.title,
+			hint = item.hint,
+			active = item.path == current_path,
+			value = item.path,
+		}
+	end
+
+	menu = Menu:open({type = 'muti-version', title = t('Muti Version'), items = items}, function(event)
+		if event.type == 'activate' then
+			-- Reload the video to apply new format
+			-- This is taken from https://github.com/jgreco/mpv-youtube-quality
+			-- which is in turn taken from https://github.com/4e6/mpv-reload/
+			local duration = mp.get_property_native('duration')
+			local time_pos = mp.get_property('time-pos')
+			-- 当前播放列表位置
+			local playlist_pos = mp.get_property_number("playlist-pos")
+			-- 获取标题信息
+			local media_title = mp.get_property("media-title")
+			local forced_title = mp.get_property("force-media-title")
+			local playlist_title = mp.get_property("playlist/" .. playlist_pos .. "/title")
+			-- 在当前位置之后插入新的URL
+			mp.commandv("loadfile", event.value, "insert-next")
+			-- 删除当前播放项
+			mp.commandv("playlist-remove", playlist_pos)
+			-- 播放原位置文件
+			mp.set_property_number("playlist-pos", playlist_pos)
+			-- 恢复标题信息
+			if forced_title and forced_title ~= "" then
+				mp.set_property("force-media-title", forced_title)
+			elseif playlist_title and playlist_title ~= "" then
+				mp.set_property("playlist/" .. playlist_pos .. "/title", playlist_title)
+				mp.set_property("force-media-title", playlist_title)
+			else
+				mp.set_property("force-media-title", media_title)
+			end
+
+			-- Tries to determine live stream vs. pre-recorded VOD. VOD has non-zero
+			-- duration property. When reloading VOD, to keep the current time position
+			-- we should provide offset from the start. Stream doesn't have fixed start.
+			-- Decent choice would be to reload stream from it's current 'live' position.
+			-- That's the reason we don't pass the offset when reloading streams.
+			if duration and duration > 0 then
+				local function seeker()
+					mp.commandv('seek', time_pos, 'absolute')
+					mp.unregister_event(seeker)
+				end
+				mp.register_event('file-loaded', seeker)
+			end
+
+			if not event.alt then menu:close() end
+		end
+	end)
+end
+
 function open_open_file_menu()
 	if Menu:is_open('open-file') then
 		Menu:close()
