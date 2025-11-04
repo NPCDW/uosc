@@ -38,7 +38,7 @@ function Controls:init_options()
 	local shorthands = {
 		['play-pause'] = 'cycle:pause:pause:no/yes=play_arrow?' .. t('Play/Pause'),
 		menu = 'command:menu:script-binding uosc/menu-blurred?' .. t('Menu'),
-		['muti-version'] = 'command:bookmarks:script-binding uosc/muti-version?' .. t('Muti Version'),
+		['muti-version'] = 'command:interests:script-binding uosc/muti-version#user-data/muti-version>0?' .. t('Muti Version'),
 		analytics = 'command:analytics:script-binding stats/display-stats-toggle?' .. t('Analytics'),
 		ontop = 'cycle:publish:ontop:no/yes!?' .. t('Ontop'),
 		subtitles = 'command:subtitles:script-binding uosc/subtitles#sub>0?' .. t('Subtitles'),

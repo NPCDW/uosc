@@ -645,6 +645,9 @@ mp.register_event('end-file', function(event)
 		file_end_timer:kill()
 		handle_file_end()
 	end
+	if event.reason ~= 'stop' and event.reason ~= 'eof' and event.reason ~= 'quit' then
+		mp.command("stop")
+	end
 end)
 mp.observe_property('playback-time', 'number', create_state_setter('time', function()
 	-- Create a file-end event that triggers right before file ends
@@ -1121,6 +1124,7 @@ mp.register_script_message("set-muti-version", function (json)
 	-- mp.commandv('show-text', "Received muti versions via IPC: " .. (json or "nil"), 3000)
 	local data = utils.parse_json(json)
 	muti_versions = data
+	mp.set_property('user-data/muti-version', #muti_versions)
 end)
 mp.register_script_message('close-menu', function(type)
 	if Menu:is_open(type) then Menu:close() end
