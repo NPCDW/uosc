@@ -642,6 +642,7 @@ end)
 mp.register_event('end-file', function(event)
 	set_state('path', nil)
 	muti_versions = {}
+	mp.set_property('user-data/muti-version', 0)
 	if event.reason == 'eof' then
 		file_end_timer:kill()
 		handle_file_end()
