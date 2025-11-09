@@ -641,12 +641,13 @@ mp.register_event('file-loaded', function()
 end)
 mp.register_event('end-file', function(event)
 	set_state('path', nil)
+	muti_versions = {}
 	if event.reason == 'eof' then
 		file_end_timer:kill()
 		handle_file_end()
 	end
 	if event.reason ~= 'stop' and event.reason ~= 'eof' and event.reason ~= 'quit' then
-		mp.command("stop")
+		mp.command("quit")
 	end
 end)
 mp.observe_property('playback-time', 'number', create_state_setter('time', function()

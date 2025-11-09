@@ -812,25 +812,12 @@ function open_muti_version_menu()
 			local time_pos = mp.get_property('time-pos')
 			-- 当前播放列表位置
 			local playlist_pos = mp.get_property_number("playlist-pos")
-			-- 获取标题信息
-			local media_title = mp.get_property("media-title")
-			local forced_title = mp.get_property("force-media-title")
-			local playlist_title = mp.get_property("playlist/" .. playlist_pos .. "/title")
 			-- 在当前位置之后插入新的URL
 			mp.commandv("loadfile", event.value, "insert-next")
 			-- 删除当前播放项
 			mp.commandv("playlist-remove", playlist_pos)
 			-- 播放原位置文件
 			mp.set_property_number("playlist-pos", playlist_pos)
-			-- 恢复标题信息
-			if forced_title and forced_title ~= "" then
-				mp.set_property("force-media-title", forced_title)
-			elseif playlist_title and playlist_title ~= "" then
-				mp.set_property("playlist/" .. playlist_pos .. "/title", playlist_title)
-				mp.set_property("force-media-title", playlist_title)
-			else
-				mp.set_property("force-media-title", media_title)
-			end
 
 			-- Tries to determine live stream vs. pre-recorded VOD. VOD has non-zero
 			-- duration property. When reloading VOD, to keep the current time position
