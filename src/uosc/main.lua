@@ -1125,12 +1125,14 @@ mp.register_script_message("set-track-title", function (json)
 	-- mp.commandv('show-text', "Received track title via IPC: " .. (json or "nil"), 3000)
 	local data = utils.parse_json(json)
 	track_titles = data
+	mp.set_property('user-data/track-titles-data', json)
 end)
 mp.register_script_message("set-muti-version", function (json)
 	-- mp.commandv('show-text', "Received muti versions via IPC: " .. (json or "nil"), 3000)
 	local data = utils.parse_json(json)
 	muti_versions = data
 	mp.set_property('user-data/muti-version', #muti_versions)
+	mp.set_property('user-data/muti-version-data', json)
 end)
 mp.register_script_message('close-menu', function(type)
 	if Menu:is_open(type) then Menu:close() end

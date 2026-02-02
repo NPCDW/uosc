@@ -83,9 +83,20 @@ function create_self_updating_menu_opener(opts)
 			end
 		end
 
+		-- 观测自定义的用户数据属性，用于触发菜单更新
+		local ignore_initial_track_title = true
+		local function handle_track_title_change(name, value)
+			if ignore_initial_track_title then
+				ignore_initial_track_title = false
+			else
+				update()
+			end
+		end
+
 		local function cleanup_and_close()
 			mp.unobserve_property(handle_list_prop_change)
 			mp.unobserve_property(handle_active_prop_change)
+			mp.unobserve_property(handle_track_title_change)
 			menu:close()
 		end
 
@@ -198,6 +209,8 @@ function create_self_updating_menu_opener(opts)
 		if opts.active_prop then
 			mp.observe_property(opts.active_prop, 'native', handle_active_prop_change)
 		end
+		-- 观测自定义触发属性，用于手动刷新菜单
+		mp.observe_property('user-data/track-titles-data', 'native', handle_track_title_change)
 	end
 end
 
@@ -794,6 +807,35 @@ function open_muti_version_menu()
 	---@type Menu
 	local menu
 
+	local function update()
+		current_path = mp.get_property_native('path')
+		items = {}
+		for index, item in ipairs(muti_versions) do
+			items[index] = {
+				title = item.title,
+				hint = item.hint,
+				active = item.path == current_path,
+				value = item.path,
+			}
+		end
+		menu:update_items(items)
+	end
+
+	-- 观测自定义触发属性
+	local ignore_initial_muti_versions = true
+	local function handle_muti_versions_change(name, value)
+		if ignore_initial_muti_versions then
+			ignore_initial_muti_versions = false
+		else
+			update()
+		end
+	end
+
+	local function cleanup_and_close()
+		mp.unobserve_property(handle_muti_versions_change)
+		menu:close()
+	end
+
 	for index, item in ipairs(muti_versions) do
 		items[index] = {
 			title = item.title,
@@ -833,8 +875,13 @@ function open_muti_version_menu()
 			end
 
 			if not event.alt then menu:close() end
+		elseif event.type == 'close' then
+			cleanup_and_close()
 		end
 	end)
+
+	-- 观测自定义触发属性
+	mp.observe_property('user-data/muti-version-data', 'native', handle_muti_versions_change)
 end
 
 function open_open_file_menu()
