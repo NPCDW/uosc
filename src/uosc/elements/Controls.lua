@@ -45,7 +45,7 @@ function Controls:init_options()
 		audio = 'command:graphic_eq:script-binding uosc/audio#audio>0?' .. t('Audio'),
 		['audio-device'] = 'command:speaker:script-binding uosc/audio-device?' .. t('Audio device'),
 		video = 'command:theaters:script-binding uosc/video#video>0?' .. t('Video'),
-		playlist = 'command:list_alt:script-binding uosc/playlist?' .. t('Playlist'),
+		playlist = 'command:list_alt:script-binding uosc/playlist#playlist>0?' .. t('Playlist'),
 		chapters = 'command:bookmark:script-binding uosc/chapters#chapters>0?' .. t('Chapters'),
 		['editions'] = 'command:bookmarks:script-binding uosc/editions#editions>1?' .. t('Editions'),
 		['stream-quality'] = 'command:high_quality:script-binding uosc/stream-quality?' .. t('Stream quality'),
