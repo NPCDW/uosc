@@ -29,6 +29,7 @@ defaults = {
 	timeline_cache = true,
 	timeline_heatmap = 'overlay',
 	timeline_mbtn_right = '',
+	continuous_caching = 0,
 
 	controls =
 	'menu,gap,<video,audio>subtitles,<has_many_audio>audio,<has_many_video>video,<has_many_edition>editions,<stream>stream-quality,gap,space,<video,audio>speed,space,shuffle,loop-playlist,loop-file,gap,prev,items,next,gap,fullscreen',
@@ -623,6 +624,89 @@ function observe_display_fps(name, fps)
 		mp.unobserve_property(observe_display_fps)
 		mp.observe_property('display-fps', 'native', update_render_delay)
 	end
+end
+
+--[[ CONTINUOUS CACHING ]]
+
+-- mpv stops reading as soon as the demuxer cache reaches its ceiling, and only
+-- starts again once playback has eaten into it. While paused that never happens,
+-- so a fully buffered stream just sits there.
+--
+-- We lift `demuxer-max-bytes` slightly above what is buffered, which makes the
+-- demuxer go fetch exactly that much more. Creeping the ceiling upwards at a
+-- fixed rate therefore throttles reading to that rate. As soon as playback eats
+-- into the buffer we hand the option back at its original value and mpv refills
+-- at full speed.
+--
+-- The option is written through `file-local-options`, so everything we do is
+-- undone when the file ends, and the user's own value is never overwritten.
+do
+	local LIMIT_PROP = 'file-local-options/demuxer-max-bytes'
+	local TICK = 0.5
+
+	---@type number|nil Ceiling as configured by the user, captured before we touch it.
+	local base_limit = nil
+	---@type number|nil Last ceiling we wrote.
+	local applied_limit = nil
+	---@type number|nil Time the throttle kicked in.
+	local throttled_since = nil
+	---@type number|nil Ceiling the creep started from.
+	local throttle_from = nil
+
+	local function set_limit(limit)
+		limit = math.floor(limit)
+		if limit == applied_limit then return end
+		if mp.set_property(LIMIT_PROP, tostring(limit)) then applied_limit = limit end
+	end
+
+	-- Hand the ceiling back so mpv can refill at full speed.
+	local function release()
+		throttled_since, throttle_from = nil, nil
+		set_limit(base_limit)
+	end
+
+	local function tick()
+		if not (base_limit and state.path) then return end
+
+		local cache_state = mp.get_property_native('demuxer-cache-state')
+		local bytes = cache_state and cache_state['fw-bytes']
+		local full = bytes ~= nil and bytes >= (applied_limit or base_limit)
+
+		if not bytes or cache_state['eof-cached'] or options.continuous_caching <= 0
+			or not full then return release() end
+
+		-- Cache is topped up: creep the ceiling up so only a trickle gets read.
+		local now = mp.get_time()
+		throttled_since = throttled_since or now
+		-- Anchored to where we started, so the creep tracks the rate instead of
+		-- compounding on top of the previous creep.
+		throttle_from = throttle_from or math.max(base_limit, bytes)
+		set_limit(throttle_from + options.continuous_caching * (now - throttled_since))
+	end
+
+	local tick_timer = mp.add_periodic_timer(TICK, tick)
+	tick_timer:kill()
+
+	-- A paused player parks the demuxer thread, which then ignores the raised
+	-- ceiling. A zero seek inside the cache nudges it awake without dropping
+	-- anything that is already buffered.
+	mp.add_periodic_timer(TICK, function()
+		if throttled_since and state.pause then mp.commandv('seek', 0, 'relative+exact') end
+	end)
+
+	mp.register_event('file-loaded', function()
+		-- Captured before any of our writes, as `options/` reports the file-local
+		-- value once we've set one.
+		base_limit = tonumber(mp.get_property_native('options/demuxer-max-bytes'))
+		applied_limit = base_limit
+		throttled_since, throttle_from = nil, nil
+		tick_timer:kill()
+		tick_timer:resume()
+	end)
+	mp.register_event('end-file', function()
+		base_limit, applied_limit, throttled_since, throttle_from = nil, nil, nil, nil
+		tick_timer:kill()
+	end)
 end
 
 --[[ STATE HOOKS ]]
