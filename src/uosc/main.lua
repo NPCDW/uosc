@@ -84,6 +84,7 @@ defaults = {
 	font_bold = false,
 	autohide = false,
 	buffered_time_threshold = 60,
+	cache_grow_on_pause = true,
 	pause_indicator = 'flash',
 	stream_quality_options = '4320,2160,1440,1080,720,480,360,240,144',
 	video_types =
@@ -416,6 +417,10 @@ state = {
 	cache_buffering = 100,
 	cache_underrun = false,
 	cache_duration = nil,
+	cache_state = nil, -- last known `demuxer-cache-state`
+	cache_secs = nil, -- how many seconds the demuxer currently has buffered ahead
+	cache_max_bytes = nil, -- current `demuxer-max-bytes` or nil when unlimited
+	cache_growing = false,
 	core_idle = false,
 	eof_reached = false,
 	render_delay = config.render_delay,
@@ -732,7 +737,90 @@ mp.observe_property('idle-active', 'bool', function(_, idle)
 	Elements:trigger('dispositions')
 	mp.commandv('script-message-to', 'thumbfast', 'clear')
 end)
-mp.observe_property('pause', 'bool', create_state_setter('pause', function() file_end_timer:kill() end))
+
+--[[ PAUSED CACHE GROWING ]]
+
+-- While paused, the demuxer tops out at `demuxer-max-bytes`, which makes seeking
+-- around a paused streamed file re-request data all the time. So while the user
+-- is paused and the cache is full, grow the limit in small steps. Reset it back
+-- to what the user configured as soon as playback is resumed.
+CACHE_GROW_STEP = 1024 -- 1KB
+CACHE_GROW_INTERVAL = 0.5
+
+-- `getprop` returns nil for unavailable properties, and prints `nan` for float ones.
+local function get_property_safe(name, type_)
+	local value, error = mp.command_native({
+		name = 'get_property',
+		args = {name},
+	})
+	if error or value == nil or value == 'nan' then return nil end
+	if type_ == 'number' then return tonumber(value) end
+	return value
+end
+
+local function parse_bytes(value)
+	if type(value) == 'number' then return value end
+	if type(value) ~= 'string' then return nil end
+	local number, unit = value:match('^%s*([%d%.]+)%s*(%a*)')
+	number = tonumber(number)
+	if not number then return nil end
+	local multipliers = {B = 1, K = 1024, KB = 1024, M = 1048576, MB = 1048576, G = 1073741824, GB = 1073741824}
+	return math.floor(number * (multipliers[unit:upper()] or 1))
+end
+
+local cache_grow_timer = mp.add_periodic_timer(CACHE_GROW_INTERVAL, function()
+	if not state.pause or state.is_idle or state.eof_reached then
+		cache_grow_timer:kill()
+		return
+	end
+
+	local cache_state = mp.get_property_native('demuxer-cache-state')
+	local forward_bytes = cache_state and cache_state['fw-bytes'] or 0
+	local max_bytes = state.cache_max_bytes
+	state.cache_growing = false
+
+	-- Nothing to grow unless the cache is size limited and full
+	if not max_bytes or forward_bytes < max_bytes then return end
+
+	state.cache_max_bytes = max_bytes + CACHE_GROW_STEP
+	state.cache_growing = true
+	mp.set_property('demuxer-max-bytes', tostring(state.cache_max_bytes))
+end)
+cache_grow_timer:kill()
+
+---@param paused boolean
+local function handle_paused_cache_grow(paused)
+	if paused and options.cache_grow_on_pause then
+		cache_grow_timer:resume()
+	else
+		cache_grow_timer:kill()
+		-- Restore the user's configured limit
+		if state.cache_growing then
+			state.cache_growing = false
+			state.cache_max_bytes = parse_bytes(get_property_safe('option/demuxer-max-bytes', 'string'))
+			if state.cache_max_bytes then
+				mp.set_property('demuxer-max-bytes', tostring(state.cache_max_bytes))
+			end
+		end
+	end
+end
+
+mp.observe_property('pause', 'bool', create_state_setter('pause', function(paused)
+	file_end_timer:kill()
+	handle_paused_cache_grow(paused)
+end))
+mp.observe_property('demuxer-max-bytes', 'native', function(_, value)
+	state.cache_max_bytes = parse_bytes(value)
+end)
+-- Poking the cache via demuxer-max-bytes tends to drop the paused cache state,
+-- so keep the amount of buffered seconds tracked with the timeline itself.
+mp.observe_property('demuxer-cache-time', 'number', function(_, cache_time)
+	local secs = nil
+	if state.time and cache_time then secs = math.max(cache_time - state.time, 0) end
+	state.cache_secs = secs
+	-- Keep elements (timeline buffer display) in sync
+	if secs then set_state('cache_duration', secs) end
+end)
 mp.observe_property('volume', 'number', create_state_setter('volume'))
 mp.observe_property('volume-max', 'number', create_state_setter('volume_max'))
 mp.observe_property('mute', 'bool', create_state_setter('mute'))
@@ -747,11 +835,15 @@ mp.observe_property('demuxer-via-network', 'native', create_state_setter('is_str
 	Elements:trigger('dispositions')
 end))
 mp.observe_property('demuxer-cache-state', 'native', function(prop, cache_state)
+	-- Changing `demuxer-max-bytes` while paused drops the reported cache state for a
+	-- moment. Keep the last known one to avoid the buffered ranges blinking.
+	if not cache_state and state.pause then cache_state = state.cache_state end
+	state.cache_state = cache_state
 	local cached_ranges, bof, eof, uncached_ranges = nil, nil, nil, nil
 	if cache_state then
 		cached_ranges, bof, eof = cache_state['seekable-ranges'], cache_state['bof-cached'], cache_state['eof-cached']
 		set_state('cache_underrun', cache_state['underrun'])
-		set_state('cache_duration', not cache_state.eof and cache_state['cache-duration'] or nil)
+		set_state('cache_duration', cache_state['cache-duration'])
 	else
 		cached_ranges = {}
 		set_state('cache_underrun', false)
@@ -760,7 +852,7 @@ mp.observe_property('demuxer-cache-state', 'native', function(prop, cache_state)
 	if not (state.duration and (#cached_ranges > 0 or state.cache == 'yes' or
 			(state.cache == 'auto' and state.is_stream))) then
 		if state.uncached_ranges then set_state('uncached_ranges', nil) end
-		set_state('cache_duration', nil)
+		set_state('cache_duration', state.cache_secs)
 		return
 	end
 
