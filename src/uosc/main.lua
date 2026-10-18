@@ -589,6 +589,21 @@ end
 local file_end_timer = mp.add_timeout(1, handle_file_end)
 file_end_timer:kill()
 
+-- 暂停期间持续检测并抬升 demuxer 缓存上限，让文件在暂停时也能继续缓存；
+-- 恢复播放时还原为备份的原始上限
+local demuxer_max_bytes_backup = nil
+local function expand_demuxer_cache()
+	local cache_state = mp.get_property_native('demuxer-cache-state')
+	if not cache_state then return end
+	local fw_bytes = cache_state['fw-bytes'] or 0
+	local max_bytes = mp.get_property_native('demuxer-max-bytes')
+	if max_bytes and max_bytes <= fw_bytes then
+		mp.set_property_native('demuxer-max-bytes', fw_bytes + 1024)
+	end
+end
+local pause_cache_timer = mp.add_periodic_timer(0.5, expand_demuxer_cache)
+pause_cache_timer:kill()
+
 function load_file_index_in_current_directory(index)
 	if not state.path or is_protocol(state.path) then return end
 
@@ -732,7 +747,21 @@ mp.observe_property('idle-active', 'bool', function(_, idle)
 	Elements:trigger('dispositions')
 	mp.commandv('script-message-to', 'thumbfast', 'clear')
 end)
-mp.observe_property('pause', 'bool', create_state_setter('pause', function() file_end_timer:kill() end))
+mp.observe_property('pause', 'bool', create_state_setter('pause', function()
+	file_end_timer:kill()
+	if state.pause then
+		-- 进入暂停：记录 demuxer-max-bytes 作为备用，并启动每 0.5 秒一次的检测
+		demuxer_max_bytes_backup = mp.get_property_native('demuxer-max-bytes')
+		pause_cache_timer:resume()
+	else
+		-- 恢复播放：还原备用的 demuxer-max-bytes 并清除定时器
+		pause_cache_timer:kill()
+		if demuxer_max_bytes_backup then
+			mp.set_property_native('demuxer-max-bytes', demuxer_max_bytes_backup)
+			demuxer_max_bytes_backup = nil
+		end
+	end
+end))
 mp.observe_property('volume', 'number', create_state_setter('volume'))
 mp.observe_property('volume-max', 'number', create_state_setter('volume_max'))
 mp.observe_property('mute', 'bool', create_state_setter('mute'))
