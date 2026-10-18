@@ -709,6 +709,114 @@ do
 	end)
 end
 
+--[[ EOF GUARD ]]
+
+-- `eof-reached` only tells us the demuxer ran out of packets, which is not
+-- necessarily the end of the file: a cache that fills up to `demuxer-max-bytes`
+-- before the file is fully buffered (see continuous caching above) leaves us
+-- sitting at the end of what is cached, not at the end of the video.
+--
+-- So when EOF hits we compare the playback position with the file duration. If
+-- they don't match, the file simply isn't buffered yet, and we pause instead of
+-- letting mpv tear the file down and move on to the next playlist entry.
+--
+-- Seeking past the buffered data while still being inside the file gets a
+-- notice as well, but playback goes on: the position is pulled back to where
+-- the cache ends, so mpv keeps reading from there rather than running dry and
+-- loading the next file.
+do
+	---@type string|nil File the last notice belongs to.
+	local notice_path = nil
+	---@type string|nil Kind of notice already shown for this file.
+	local notice_kind = nil
+	---@type boolean Whether a check is already scheduled to run after a seek.
+	local check_scheduled = false
+	---@type nil|number Timer of the scheduled check.
+	local check_timer = nil
+
+	local function notice(kind, text)
+		if not (notice_path and notice_path == state.path) then return end
+		-- Repeat only once the OSD has moved on, so seeking around doesn't spam.
+		if notice_kind == kind and mp.get_property_native('osd-visible') then return end
+		mp.commandv('show-text', text, 5000)
+		notice_kind = kind
+	end
+
+	local function cache_state()
+		return mp.get_property_native('demuxer-cache-state')
+	end
+
+	---@return boolean Whether the demuxer has read the file all the way to the end.
+	local function cache_eof()
+		local cached = cache_state()
+		return cached and cached['eof-cached'] or false
+	end
+
+	---@return number|nil Position where the buffered data ends.
+	local function cached_end()
+		local ranges = cache_state() and cache_state()['seekable-ranges']
+		if not ranges then return nil end
+		local last
+		for _, range in ipairs(ranges) do
+			if last == nil or (range['end'] or 0) > last then last = range['end'] end
+		end
+		return last
+	end
+
+	local function cancel_check()
+		if check_timer then check_timer:kill() end
+		check_timer, check_scheduled = nil, false
+	end
+
+	local function check()
+		cancel_check()
+		if state.is_idle or state.core_idle then return end
+		local time, duration = state.time, state.duration
+		if not (state.path and time and duration) then return end
+		if notice_path ~= state.path then notice_path, notice_kind = state.path, nil end
+
+		-- Past the buffered data, but still inside the file: go back to where
+		-- the cache ends so reading resumes from there.
+		local cache_end = cached_end()
+		if cache_end and not cache_eof() and time > cache_end + 0.5 and time < duration - 0.5 then
+			mp.commandv('seek', math.max(cache_end - 1, 0), 'absolute+exact')
+			notice('beyond-cache', t('Seek beyond cached data, but still within file duration'))
+			return
+		end
+
+		if state.eof_reached then
+			if not cache_eof() then
+				-- Only a slice of the file is buffered: hold playback here instead
+				-- of letting mpv move on to the next file.
+				file_end_timer:kill()
+				mp.commandv('set', 'pause', 'yes')
+				notice('eof', t('Playback reached end of file, cached data is shorter than file duration'))
+			elseif time + 1 < duration then
+				notice('eof', t('Playback reached end of file'))
+			end
+		end
+	end
+
+	-- A seek doesn't land instantly, so wait a beat before judging the
+	-- position, or we'd be reading the pre-seek time.
+	local function schedule_check()
+		if check_scheduled then return end
+		check_scheduled = true
+		check_timer = mp.add_timeout(0.2, function()
+			check_scheduled, check_timer = false, nil
+			check()
+		end)
+	end
+
+	mp.observe_property('eof-reached', 'native', create_state_setter('eof_reached', check))
+	mp.register_event('seek', schedule_check)
+	mp.register_event('file-loaded', cancel_check)
+	mp.register_event('end-file', function()
+		cancel_check()
+		notice_path, notice_kind = nil, nil
+	end)
+end
+
 --[[ STATE HOOKS ]]
 
 mp.register_event('file-loaded', function()
@@ -882,7 +990,6 @@ mp.observe_property('demuxer-cache-state', 'native', function(prop, cache_state)
 end)
 mp.observe_property('display-fps', 'native', observe_display_fps)
 mp.observe_property('estimated-display-fps', 'native', update_render_delay)
-mp.observe_property('eof-reached', 'native', create_state_setter('eof_reached'))
 mp.observe_property('core-idle', 'native', create_state_setter('core_idle'))
 
 --[[ KEY BINDS ]]
