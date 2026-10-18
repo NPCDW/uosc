@@ -61,7 +61,6 @@
 	"Paste path or url to add.": "貼上路徑或 url 以新增",
 	"Paste path or url to open.": "貼上路徑或 url 以開啟",
 	"Play/Pause": "播放/暫停",
-	"Playback reached end of file": "已播放到檔案結尾",
 	"Playback reached end of file, cached data is shorter than file duration": "已播放到快取結尾，快取時長小於檔案總時長",
 	"Seek beyond cached data, but still within file duration": "已跳轉到快取範圍之外，但仍在檔案時長內",
 	"Playlist": "播放清單",

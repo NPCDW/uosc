@@ -108,7 +108,7 @@ end
 -- A 600s file of which only 0..100s is buffered.
 props['path'] = '/media/movie.mkv'
 props['playback-time'] = 100
-props['demuxer-cache-state'] = {['eof-cached'] = false, ['seekable-ranges'] = {{['start'] = 0, ['end'] = 100}}}
+props['demuxer-cache-state'] = {eof = false, ['eof-cached'] = false, ['seekable-ranges'] = {{['start'] = 0, ['end'] = 100}}}
 props['eof-reached'] = false
 fire('file-loaded')
 set('duration', 600)
@@ -119,10 +119,40 @@ print('== 0: playing inside the cache ==')
 set('playback-time', 50)
 report('time=50 (cached)')
 
-print('== 1: EOF while only part of the file is buffered ==')
-props['eof-reached'] = true
-set('eof-reached', true)
-report('eof-reached=true, cache=0..100')
+print('== 1: demuxer runs dry with only part of the file buffered ==')
+set('playback-time', 100)
+props['demuxer-cache-state'] = {underrun = true, ['eof-cached'] = false,
+	['seekable-ranges'] = {{['start'] = 0, ['end'] = 100}}}
+set('demuxer-cache-state', props['demuxer-cache-state'])
+report('underrun at end of cache, cache=0..100')
+
+print('== 1b: end-file arrives after the damage is done ==')
+fire('end-file', {reason = 'eof'})
+report('end-file eof, cache=0..100')
+
+-- end-file tears the file down, so put it back for the remaining scenarios
+props['path'] = '/media/movie.mkv'
+props['playback-time'] = 100
+fire('file-loaded')
+set('playback-time', 100)
+
+print('== 1c: underrun with the whole file buffered is a no-op ==')
+props['playback-time'] = 100
+props['demuxer-cache-state'] = {underrun = true, ['eof-cached'] = true,
+	['seekable-ranges'] = {{['start'] = 0, ['end'] = 600}}}
+set('demuxer-cache-state', props['demuxer-cache-state'])
+report('underrun, cache=0..600, time=100')
+
+print('== 1d: no underrun, just parked at the end of the buffer ==')
+props['demuxer-cache-state'] = {['eof-cached'] = false,
+	['seekable-ranges'] = {{['start'] = 0, ['end'] = 100}}}
+set('demuxer-cache-state', props['demuxer-cache-state'])
+report('no underrun, cache=0..100, time=100')
+
+-- back to the 0..100 buffer for the seek scenarios
+props['demuxer-cache-state'] = {['eof-cached'] = false,
+	['seekable-ranges'] = {{['start'] = 0, ['end'] = 100}}}
+set('demuxer-cache-state', props['demuxer-cache-state'])
 
 print('== 2: seek past the buffered data, still inside the file ==')
 props['eof-reached'] = false
@@ -136,9 +166,9 @@ set('playback-time', 80)
 fire('seek')
 report('time=80 (cached)')
 
-print('== 4: EOF with the whole file buffered, well before the end ==')
+print('== 4: eof-reached no longer drives the guard ==')
 set('playback-time', 595)
-props['demuxer-cache-state'] = {['eof-cached'] = true, ['seekable-ranges'] = {{['start'] = 0, ['end'] = 600}}}
+props['demuxer-cache-state'] = {eof = false, ['eof-cached'] = true, ['seekable-ranges'] = {{['start'] = 0, ['end'] = 600}}}
 props['eof-reached'] = true
 set('eof-reached', true)
 report('eof-reached=true, cache=0..600, time=595')
@@ -154,7 +184,7 @@ print('== 6: a second file starts fresh ==')
 props['path'] = '/media/other.mkv'
 props['playback-time'] = 10
 props['duration'] = 120
-props['demuxer-cache-state'] = {['eof-cached'] = true, ['seekable-ranges'] = {{['start'] = 0, ['end'] = 120}}}
+props['demuxer-cache-state'] = {eof = true, ['eof-cached'] = true, ['seekable-ranges'] = {{['start'] = 0, ['end'] = 120}}}
 props['eof-reached'] = false
 fire('file-loaded')
 set('duration', 120)

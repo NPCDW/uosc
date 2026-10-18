@@ -418,7 +418,6 @@ state = {
 	cache_underrun = false,
 	cache_duration = nil,
 	core_idle = false,
-	eof_reached = false,
 	render_delay = config.render_delay,
 	playlist_count = 0,
 	playlist_pos = 0,
@@ -711,26 +710,28 @@ end
 
 --[[ EOF GUARD ]]
 
--- `eof-reached` only tells us the demuxer ran out of packets, which is not
--- necessarily the end of the file: a cache that fills up to `demuxer-max-bytes`
--- before the file is fully buffered (see continuous caching above) leaves us
--- sitting at the end of what is cached, not at the end of the video.
+-- mpv ends a file in two very different situations: the video played through,
+-- or the demuxer ran out of packets to hand to the decoder. The second one is
+-- not the end of the file - it only means nothing more is buffered - and a
+-- cache that fills up to `demuxer-max-bytes` before the file is fully read (see
+-- continuous caching above) leaves playback sitting at the end of what is
+-- cached, not at the end of the video.
 --
--- So when EOF hits we compare the playback position with the file duration. If
--- they don't match, the file simply isn't buffered yet, and we pause instead of
--- letting mpv tear the file down and move on to the next playlist entry.
+-- `eof-reached` cannot tell those apart: it goes off as soon as the decoder
+-- drains, whether the file is over or not. The demuxer cache state can - its
+-- `underrun` flag means the reader was asked for a packet and had none, while
+-- still not being at the end of the file. That is the end-of-file signal worth
+-- acting on, and it arrives while the file is still loaded, so playback can be
+-- held before mpv decides the file is over and moves to the next entry.
 --
 -- Seeking past the buffered data while still being inside the file gets a
 -- notice as well, but playback goes on: the position is pulled back to where
--- the cache ends, so mpv keeps reading from there rather than running dry and
--- loading the next file.
+-- the cache ends, so mpv keeps reading from there rather than running dry.
 do
 	---@type string|nil File the last notice belongs to.
 	local notice_path = nil
 	---@type string|nil Kind of notice already shown for this file.
 	local notice_kind = nil
-	---@type boolean Whether a check is already scheduled to run after a seek.
-	local check_scheduled = false
 	---@type nil|number Timer of the scheduled check.
 	local check_timer = nil
 
@@ -765,51 +766,59 @@ do
 
 	local function cancel_check()
 		if check_timer then check_timer:kill() end
-		check_timer, check_scheduled = nil, false
+		check_timer = nil
 	end
 
-	local function check()
+	---Hold playback where it is instead of letting mpv move on to the next file.
+	local function hold()
+		file_end_timer:kill()
+		if not state.pause then mp.commandv('set', 'pause', 'yes') end
+		notice('eof', t('Playback reached end of file, cached data is shorter than file duration'))
+	end
+
+	---@param from_seek boolean Whether the position moved because of a seek.
+	local function check(from_seek)
 		cancel_check()
 		if state.is_idle or state.core_idle then return end
 		local time, duration = state.time, state.duration
 		if not (state.path and time and duration) then return end
 		if notice_path ~= state.path then notice_path, notice_kind = state.path, nil end
 
-		-- Past the buffered data, but still inside the file: go back to where
-		-- the cache ends so reading resumes from there.
+		-- Playback is at or past everything that is buffered, yet the file goes on.
 		local cache_end = cached_end()
-		if cache_end and not cache_eof() and time > cache_end + 0.5 and time < duration - 0.5 then
+		if not (cache_end and not cache_eof() and time >= cache_end
+				and time < duration - 0.5) then return end
+
+		if from_seek then
+			-- The user asked for a position we do not have yet: go back to where
+			-- the cache ends so reading resumes from there.
 			mp.commandv('seek', math.max(cache_end - 1, 0), 'absolute+exact')
 			notice('beyond-cache', t('Seek beyond cached data, but still within file duration'))
-			return
-		end
-
-		if state.eof_reached then
-			if not cache_eof() then
-				-- Only a slice of the file is buffered: hold playback here instead
-				-- of letting mpv move on to the next file.
-				file_end_timer:kill()
-				mp.commandv('set', 'pause', 'yes')
-				notice('eof', t('Playback reached end of file, cached data is shorter than file duration'))
-			elseif time + 1 < duration then
-				notice('eof', t('Playback reached end of file'))
-			end
+		elseif state.cache_underrun then
+			-- Nothing left to decode while the file is far from over, so mpv is
+			-- about to declare EOF and load the next playlist entry.
+			hold()
 		end
 	end
 
 	-- A seek doesn't land instantly, so wait a beat before judging the
 	-- position, or we'd be reading the pre-seek time.
-	local function schedule_check()
-		if check_scheduled then return end
-		check_scheduled = true
+	local function check_later()
+		if check_timer then return end
 		check_timer = mp.add_timeout(0.2, function()
-			check_scheduled, check_timer = false, nil
-			check()
+			check_timer = nil
+			check(true)
 		end)
 	end
 
-	mp.observe_property('eof-reached', 'native', create_state_setter('eof_reached', check))
-	mp.register_event('seek', schedule_check)
+	-- The cache state is already observed further down to keep the timeline
+	-- honest, but only one callback per property survives, so the guard hangs
+	-- off `cache_underrun` instead: it is written on every cache update, and
+	-- flipping it is exactly what tells us the demuxer was asked for a packet
+	-- it did not have.
+	state.on_cache_underrun = function() check(false) end
+
+	mp.register_event('seek', check_later)
 	mp.register_event('file-loaded', cancel_check)
 	mp.register_event('end-file', function()
 		cancel_check()
