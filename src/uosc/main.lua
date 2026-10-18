@@ -583,12 +583,15 @@ end
 -- where the cached data ends, and mpv treats it as the end of the file: it
 -- stops playback and advances the playlist, even though the file is not over.
 -- This checks whether the end of the cached data is actually (close to) the
--- end of the file, and if it's not, keeps the file open and pins playback to
--- the end of the cached data instead of letting the file end.
+-- end of the file, and if it's not, keeps the file open and, once playback
+-- reaches the end of the cached data or the user seeks past it, shows a message
+-- and reloads the file instead of letting the file end.
 
 local eof_guard = {
 	active = false, -- guard is engaged for the current file
 	pos = nil, -- end of the cached data, playback is pinned to it
+	path = nil, -- path of the guarded file, reloaded when the guard trips
+	reloading = false, -- a reload was already issued for the current guard
 	keep_open = nil, -- saved `keep-open` value, restored when guard disengages
 	keep_open_pause = nil, -- saved `keep-open-pause` value, restored when guard disengages
 }
@@ -597,6 +600,8 @@ local function eof_guard_disengage()
 	if not eof_guard.active then return end
 	eof_guard.active = false
 	eof_guard.pos = nil
+	eof_guard.path = nil
+	eof_guard.reloading = false
 	if eof_guard.keep_open then
 		mp.set_property('keep-open', eof_guard.keep_open)
 		mp.set_property('keep-open-pause', eof_guard.keep_open_pause)
@@ -609,6 +614,8 @@ local function eof_guard_engage(pos)
 	if eof_guard.active then return end
 	eof_guard.active = true
 	eof_guard.pos = pos
+	eof_guard.path = state.path -- saved for reloading, as `state.path` is cleared on end-file
+	eof_guard.reloading = false
 	eof_guard.keep_open = mp.get_property('keep-open')
 	eof_guard.keep_open_pause = mp.get_property('keep-open-pause')
 	-- `always` keeps the file open even when it's not the last playlist entry,
@@ -639,13 +646,47 @@ local function eof_guard_check(cache_state)
 	if duration - pos > options.eof_guard_threshold then eof_guard_engage(pos) end
 end
 
--- Pins playback back to the end of the cached data when it somehow ends up
--- beyond it (e.g. user seeks past it), instead of letting mpv move on.
-local function eof_guard_clamp()
-	if eof_guard.active and state.time and state.time > eof_guard.pos + 0.5 then
-		mp.commandv('seek', tostring(eof_guard.pos), 'absolute')
-		mp.commandv('set', 'pause', 'yes')
+-- Whether playback ended up beyond the end of the cached data (e.g. the user
+-- seeked into an uncached region), which is where the guard trips.
+local function eof_guard_past_end()
+	return eof_guard.active and state.time and state.time > eof_guard.pos + 0.5
+end
+
+-- Reloads the guarded file to recover from the premature EOF. Based on the
+-- reload logic of the stream quality menu: the file is inserted after the
+-- current playlist entry, which is then removed, keeping the playlist intact.
+-- VODs resume at the position playback was pinned to, while streams are
+-- reloaded from their current live position.
+local function eof_guard_reload()
+	if eof_guard.reloading then return end
+	local path = eof_guard.path
+	if not path then return end
+	eof_guard.reloading = true
+	mp.commandv('show-text', t('Stream ended prematurely, reloading...'), 10000)
+	local duration = mp.get_property_native('duration')
+	local time_pos = mp.get_property('time-pos')
+	local playlist_pos = mp.get_property_number('playlist-pos')
+	if playlist_pos then
+		mp.commandv('loadfile', path, 'insert-next')
+		mp.commandv('playlist-remove', playlist_pos)
+		mp.set_property_number('playlist-pos', playlist_pos)
+	else
+		mp.commandv('loadfile', path, 'replace')
 	end
+	local function resume()
+		if duration and duration > 0 and time_pos then
+			mp.commandv('seek', time_pos, 'absolute')
+		end
+		mp.set_property('pause', 'no')
+		mp.unregister_event(resume)
+	end
+	mp.register_event('file-loaded', resume)
+end
+
+-- Trips the guard, reloading the file instead of letting mpv move on, when
+-- playback ends up beyond the end of the cached data.
+local function eof_guard_react()
+	if eof_guard_past_end() then eof_guard_reload() end
 end
 
 -- Cache state is only pushed every once in a while, and can stop being pushed
@@ -654,6 +695,19 @@ local eof_guard_timer
 eof_guard_timer = mp.add_timeout(0.5, function()
 	eof_guard_check()
 	eof_guard_timer:resume()
+end)
+
+-- An engaged `keep-open` makes mpv pause at the end of the file *without*
+-- firing an `end-file` event, so playback reaching the end of the cached data
+-- (which is where mpv considers the file over) has to be detected by watching
+-- `eof-reached` instead. The position check makes sure playback actually sits
+-- at the end of the cached data, so that a stale `eof-reached` (e.g. right
+-- after seeking back into the cache) can't trigger a reload.
+mp.observe_property('eof-reached', 'bool', function(_, eof_reached)
+	if eof_reached and eof_guard.active and state.time
+		and state.time >= eof_guard.pos - 0.5 then
+		eof_guard_reload()
+	end
 end)
 
 function handle_file_end()
@@ -732,6 +786,11 @@ mp.register_event('end-file', function(event)
 	mp.set_property('user-data/muti-version', 0)
 	if event.reason == 'eof' then
 		file_end_timer:kill()
+		-- Fallback for when an EOF does fire the event (an engaged guard means
+		-- the stream died at the end of the cached data before the file was
+		-- actually over, so reload it instead of ending it). The usual path is
+		-- the `eof-reached` observer, as `keep-open` suppresses this event.
+		if eof_guard.active then eof_guard_reload() end
 		handle_file_end()
 	end
 	if event.reason ~= 'stop' and event.reason ~= 'eof' and event.reason ~= 'quit' then
@@ -740,12 +799,14 @@ mp.register_event('end-file', function(event)
 	eof_guard_disengage()
 end)
 mp.observe_property('playback-time', 'number', create_state_setter('time', function()
-	-- Pin playback to the end of cached data if it ends up beyond it
-	eof_guard_clamp()
+	-- Reload the file if playback ended up beyond the cached data (e.g. seek)
+	eof_guard_react()
 
 	-- Create a file-end event that triggers right before file ends
 	file_end_timer:kill()
-	if state.duration and state.time and not state.pause then
+	-- Skip while the guard is tripping, as the file-end must not navigate away
+	-- from the file that is being reloaded
+	if state.duration and state.time and not state.pause and not eof_guard_past_end() then
 		local remaining = (state.duration - state.time) / state.speed
 		if remaining < 5 then
 			local timeout = remaining - 0.02
