@@ -65,6 +65,8 @@ defaults = {
 
 	autoload = false,
 	shuffle = false,
+	eof_guard = true,
+	eof_guard_threshold = 2,
 
 	scale = 1,
 	scale_fullscreen = 1.3,
@@ -574,7 +576,89 @@ function set_state(name, value)
 	Elements:trigger('prop_' .. name, value)
 end
 
+--[[ EOF GUARD ]]
+
+-- When a stream dies prematurely (e.g. network connection dropped and mpv's
+-- reconnect attempts failed), the demuxer cache reports EOF at the position
+-- where the cached data ends, and mpv treats it as the end of the file: it
+-- stops playback and advances the playlist, even though the file is not over.
+-- This checks whether the end of the cached data is actually (close to) the
+-- end of the file, and if it's not, keeps the file open and pins playback to
+-- the end of the cached data instead of letting the file end.
+
+local eof_guard = {
+	active = false, -- guard is engaged for the current file
+	pos = nil, -- end of the cached data, playback is pinned to it
+	keep_open = nil, -- saved `keep-open` value, restored when guard disengages
+	keep_open_pause = nil, -- saved `keep-open-pause` value, restored when guard disengages
+}
+
+local function eof_guard_disengage()
+	if not eof_guard.active then return end
+	eof_guard.active = false
+	eof_guard.pos = nil
+	if eof_guard.keep_open then
+		mp.set_property('keep-open', eof_guard.keep_open)
+		mp.set_property('keep-open-pause', eof_guard.keep_open_pause)
+	end
+	eof_guard.keep_open = nil
+	eof_guard.keep_open_pause = nil
+end
+
+local function eof_guard_engage(pos)
+	if eof_guard.active then return end
+	eof_guard.active = true
+	eof_guard.pos = pos
+	eof_guard.keep_open = mp.get_property('keep-open')
+	eof_guard.keep_open_pause = mp.get_property('keep-open-pause')
+	-- `always` keeps the file open even when it's not the last playlist entry,
+	-- which is what stops mpv from advancing to the next file at EOF, while
+	-- `keep-open-pause` makes it pause at the last frame instead of moving on.
+	mp.set_property('keep-open', 'always')
+	mp.set_property('keep-open-pause', 'yes')
+end
+
+-- Evaluates whether the current file ended prematurely. `cache_state` can be
+-- passed in by callers that already have it to avoid a redundant property read.
+local function eof_guard_check(cache_state)
+	if not options.eof_guard or eof_guard.active or not state.path then return end
+	cache_state = cache_state or mp.get_property_native('demuxer-cache-state')
+	-- Only streams that declared EOF are of interest. Anything else is either
+	-- still buffering or a file that legitimately ends where its data ends.
+	if not cache_state or not cache_state['eof-cached'] then return end
+	-- End of the cached data is where mpv is about to stop playback.
+	local pos
+	for _, range in ipairs(cache_state['seekable-ranges'] or {}) do
+		if range['end'] and (not pos or range['end'] > pos) then pos = range['end'] end
+	end
+	pos = pos or cache_state['cache-end']
+	local duration = state.duration
+	-- Duration is unknown for some streams (e.g. live ones), in which case we
+	-- can't tell a premature EOF from a real one.
+	if not (pos and duration and duration > 0) then return end
+	if duration - pos > options.eof_guard_threshold then eof_guard_engage(pos) end
+end
+
+-- Pins playback back to the end of the cached data when it somehow ends up
+-- beyond it (e.g. user seeks past it), instead of letting mpv move on.
+local function eof_guard_clamp()
+	if eof_guard.active and state.time and state.time > eof_guard.pos + 0.5 then
+		mp.commandv('seek', tostring(eof_guard.pos), 'absolute')
+		mp.commandv('set', 'pause', 'yes')
+	end
+end
+
+-- Cache state is only pushed every once in a while, and can stop being pushed
+-- entirely once the stream EOFs, so also check periodically.
+local eof_guard_timer
+eof_guard_timer = mp.add_timeout(0.5, function()
+	eof_guard_check()
+	eof_guard_timer:resume()
+end)
+
 function handle_file_end()
+	-- A file with an engaged EOF guard didn't really end, so don't navigate away
+	if eof_guard.active then return end
 	local resume = false
 	if not state.loop_file then
 		if state.has_playlist then
@@ -628,6 +712,7 @@ end
 --[[ STATE HOOKS ]]
 
 mp.register_event('file-loaded', function()
+	eof_guard_disengage()
 	local path = normalize_path(mp.get_property_native('path'))
 	itable_delete_value(state.history, path)
 	state.history[#state.history + 1] = path
@@ -652,8 +737,12 @@ mp.register_event('end-file', function(event)
 	if event.reason ~= 'stop' and event.reason ~= 'eof' and event.reason ~= 'quit' then
 		mp.command("quit")
 	end
+	eof_guard_disengage()
 end)
 mp.observe_property('playback-time', 'number', create_state_setter('time', function()
+	-- Pin playback to the end of cached data if it ends up beyond it
+	eof_guard_clamp()
+
 	-- Create a file-end event that triggers right before file ends
 	file_end_timer:kill()
 	if state.duration and state.time and not state.pause then
@@ -747,6 +836,7 @@ mp.observe_property('demuxer-via-network', 'native', create_state_setter('is_str
 	Elements:trigger('dispositions')
 end))
 mp.observe_property('demuxer-cache-state', 'native', function(prop, cache_state)
+	eof_guard_check(cache_state)
 	local cached_ranges, bof, eof, uncached_ranges = nil, nil, nil, nil
 	if cache_state then
 		cached_ranges, bof, eof = cache_state['seekable-ranges'], cache_state['bof-cached'], cache_state['eof-cached']
@@ -774,7 +864,9 @@ mp.observe_property('demuxer-cache-state', 'native', function(prop, cache_state)
 	end
 	table.sort(ranges, function(a, b) return a[1] < b[1] end)
 	if bof then ranges[1][1] = 0 end
-	if eof then ranges[#ranges][2] = state.duration end
+	-- An engaged EOF guard means the stream ended prematurely, in which case the
+	-- cache does not extend to the end of the file.
+	if eof and not eof_guard.active then ranges[#ranges][2] = state.duration end
 	-- Invert cached ranges into uncached ranges, as that's what we're rendering
 	local inverted_ranges = {{0, state.duration}}
 	for _, cached in pairs(ranges) do
